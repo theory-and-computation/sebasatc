@@ -1,147 +1,132 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
-class xdatcar:
-    """ Python Class for VASP XDATCAR """
+class Poscar:
+    """ Python Class for VASP POSCAR """
 
-    def __init__(self, File=None):
-        if File is None:
-            self.xdatcar = 'XDATCAR'
-        else:
-            self.xdatcar = File
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.atom_types = None
+        self.atom_counts = None
+        self.lattice_constants = None
+        self.lattice_matrix = None
+        self.initial_positions = None
+        self.after_rotation = None
+        self.atom_id = None
+        self.slab_center = None  # Center of the slab
+        self.read_poscar()
 
-        self.TypeName = None
-        self.ChemSymb = None
-        self.Ntype = None
-        self.Nions = None
-        self.Nelem = None
-        self.Niter = None
+    def read_poscar(self):
+        """Reads the POSCAR file and extracts lattice information and atomic positions"""
+        with open(self.file_path, 'r') as f:
+            lines = f.readlines()
 
-        # position in Direct Coordinate
-        self.position = None
-        # position in Cartesian Coordinate
-        self.positionC = None
-        self.readxdat()
+        # Reading lattice vectors
+        lattice_constants = np.array(list(map(float, lines[1].split())))
+        lattice_matrix = np.array([list(map(float, line.split())) for line in lines[2:5]])
 
-    def readxdat(self):
-        """ Read VASP XDATCAR """
-        inp = [line for line in open(self.xdatcar) if line.strip()]
-        scale = float(inp[1])
+        # Reading atomic species and counts
+        atom_types = lines[5].split()
+        atom_counts = list(map(int, lines[6].split()))
 
-        self.cell = np.array([line.split() for line in inp[2:5]], dtype=float)
-        self.cell *= scale
+        # Reading atomic positions (Cartesian coordinates)
+        initial_positions = []
+        for line in lines[8:]:
+            if line.strip() == '':
+                break
+            initial_positions.append(list(map(float, line.split()[:3])))
 
-        ta = inp[5].split()
-        tb = inp[6].split()
+        self.lattice_constants = lattice_constants
+        self.lattice_matrix = lattice_matrix
+        self.atom_types = atom_types
+        self.atom_counts = atom_counts
+        self.initial_positions = np.array(initial_positions)
 
-        if ta[0].isalpha():
-            self.TypeName = ta
-            self.Ntype = len(ta)
-            self.Nelem = np.array(tb, dtype=int)
-            self.Nions = self.Nelem.sum()
-        else:
-            print("VASP 4.X Format encountered...")
-            self.Nelem = np.array(tb, dtype=int)
-            self.Nions = self.Nelem.sum()
-            self.Ntype = len(tb)
-            self.TypeName = None
+    def set_slab_center(self, center):
+        """Manually sets the center of the slab"""
+        self.slab_center = np.array(center)
 
-        pos = np.array([line.split() for line in inp[7:] if not line.split()[0].isalpha()], dtype=float)
-        self.position = pos.ravel().reshape((-1, self.Nions, 3))
-        self.Niter = self.position.shape[0]
+    def rotate_atoms(self, rotation_radius, rotation_angle_degrees):
+        """Rotates atoms within a specified radius by a given angle in degrees"""
+        rotation_angle_radians = np.radians(rotation_angle_degrees)
+        rotation_matrix = np.array([[np.cos(rotation_angle_radians), -np.sin(rotation_angle_radians), 0],
+                                    [np.sin(rotation_angle_radians), np.cos(rotation_angle_radians), 0],
+                                    [0, 0, 1]])
+        rotated_positions = []
 
-        self.positionC = np.zeros_like(self.position)
+        if self.slab_center is None:
+            raise ValueError("Center of the slab is not set. Please use set_slab_center method to set the center manually.")
 
-        for i in range(self.Niter):
-            self.positionC[i, :, :] = np.dot(self.position[i, :, :], self.cell)
-            for j in range(0, 3):
-                self.positionC[i, :, j] = np.mod(self.positionC[i, :, j], self.cell[j, j])
+        for position in self.initial_positions:
+            # Calculate the distance between the position and the center of the slab in the xy plane
+            distance_to_center = np.linalg.norm(position[:2] - self.slab_center[:2])
+            if distance_to_center <= rotation_radius:
+                # Translate atom position to the center of the slab
+                translated_position = position - self.slab_center
+                # Rotate atom position
+                rotated_position = np.dot(translated_position, rotation_matrix)
+                # Translate back to the original position
+                rotated_position += self.slab_center
+                rotated_positions.append(rotated_position)
+            else:
+                rotated_positions.append(position)
 
-# Function to calculate the angle between two vectors
-def calculate_angle(v1, v2):
-    dot_product = np.dot(v1, v2)
-    norm_v1 = np.linalg.norm(v1)
-    norm_v2 = np.linalg.norm(v2)
-    cos_theta = dot_product / (norm_v1 * norm_v2)
-    angle = np.arccos(cos_theta) * 180 / np.pi  # Convert to degrees
-    return angle
+        self.after_rotation = np.array(rotated_positions)
+
+    def pair_atoms_with_type(self):
+        """Pairs each XYZ position with its corresponding atom type"""
+        self.atom_id = np.repeat(np.arange(len(self.atom_types)), self.atom_counts)
+
+    def remove_overlapping_atoms(self, cutoff_distance=2.1):
+        """Removes overlapping atoms based on a specified cutoff distance"""
+        remaining_atoms = []
+        remaining_atom_counts = np.zeros(len(self.atom_types), dtype=int)
+
+        for i in range(len(self.after_rotation)):
+            is_overlapping = False
+            for j in range(i+1, len(self.after_rotation)):
+                dist = np.linalg.norm(self.after_rotation[i] - self.after_rotation[j])
+                if dist < cutoff_distance:
+                    is_overlapping = True
+                    break
+            if not is_overlapping:
+                remaining_atoms.append(self.after_rotation[i])
+                remaining_atom_counts[self.atom_id[i]] += 1
+
+        self.after_rotation = np.array(remaining_atoms)
+        self.atom_counts = remaining_atom_counts
+
+    def write_poscar(self, output_file):
+        """Writes the modified POSCAR to a new file"""
+        with open(output_file, 'w') as f:
+            f.write(" ".join(self.atom_types) + "\n")
+            for lattice_constant in self.lattice_constants:
+                f.write(str(lattice_constant) + "\n")
+            for row in self.lattice_matrix:
+                f.write(" ".join(map(str, row)) + "\n")
+            f.write(" ".join(map(str, self.atom_counts)) + "\n")
+            f.write("Cartesian\n")
+            for pos in self.after_rotation:
+                f.write(" ".join(map(str, pos)) + "\n")
 
 if __name__ == '__main__':
-    inp = xdatcar()
+    rotation_radius = float(input("Enter the rotation radius: "))  # Input the rotation radius
+    rotation_angle = float(input("Enter the rotation angle in degrees: "))  # Input the rotation angle in degrees
 
-    # Indices for carbon atoms and gold atom
-    carbon_atom_index1 = 140
-    carbon_atom_index2 = 143
+    poscar = Poscar("POSCAR1.vasp")
 
-    # Z-coordinate for the gold surface
-    gold_surface_z = 16.0
+    # Manually set the center of the slab
+    center_x = 54.6745
+    center_y = 54.6745
+    poscar.set_slab_center([center_x, center_y, 0])
 
-    # Lists to store time and corresponding angles
-    time_ps = []
-    angles = []
+    # Rotate atoms within the specified radius by the specified angle
+    poscar.rotate_atoms(rotation_radius, rotation_angle)
 
-    # Lists to store time and corresponding adjusted angles
-    adjusted_angles = []
+    # Pair atoms with their types
+    poscar.pair_atoms_with_type()
 
-    # Assuming each configuration is separated by 1 ps
-    time_step = 1.0
+    # Remove overlapping atoms
+    poscar.remove_overlapping_atoms()
 
-    # Loop through configurations and calculate angles
-    for i in range(0, inp.Niter):
-        config = inp.positionC[i, :, :]
-
-        # Define vectors normal to planes formed by atoms
-        plane_vector1 = config[carbon_atom_index2, :] - config[carbon_atom_index1, :]
-        plane_vector2 = np.array([0.0, 0.0, gold_surface_z])  # Vector normal to the gold surface plane
-
-        # Calculate the angle between planes
-        angle = calculate_angle(plane_vector1, plane_vector2)
-
-        # Adjust the angle by subtracting 90 degrees
-        adjusted_angle = angle - 90.0
-
-        time = i * time_step
-        time_ps.append(time)
-        angles.append(angle)
-        adjusted_angles.append(adjusted_angle)
-
-    # Specify the file path where you want to save the output
-    output_file_path = "output.txt"
-    adjusted_output_file_path = "adjusted_output.txt"
-
-    # Open the file in write mode
-    with open(output_file_path, "w") as file:
-        # Loop through configurations
-        for i in range(inp.Niter):
-            # Write configuration header to the file
-            file.write(f"Configuration {i + 1}:\n")
-
-            # Loop through atoms in the configuration
-            for j in range(inp.Nions):
-                # Write atom position to the file
-                file.write(f"Atom {j + 1}: {config[j, :]}\n")
-
-
-
-    # Print a message indicating that the data has been saved
-   
-    print(f"Adjusted data saved to {adjusted_output_file_path}")
-
-    # Plot the angle vs time graph
-    plt.figure(figsize=(12, 6))
-
-    plt.subplot(2, 1, 1)
-    plt.plot(time_ps, angles, marker='o', markersize=3)
-    plt.xlabel('Time (ps)')
-    plt.ylabel('Angle (degrees)')
-    plt.title('Angle between C-C plane and Gold surface plane vs Time')
-
-    # Plot the adjusted angle vs time graph
-    plt.subplot(2, 1, 2)
-    plt.plot(time_ps, adjusted_angles, marker='o', markersize=3, color='orange')
-    plt.xlabel('Time (ps)')
-    plt.ylabel('Adjusted Angle (degrees)')
-    plt.title('Adjusted Angle between C-C plane and Gold surface plane vs Time')
-
-    plt.tight_layout()
-    plt.show()
+    # Write the modified POSCAR to a new file
+    poscar.write_poscar("rotated_and_filtered_POSCAR")

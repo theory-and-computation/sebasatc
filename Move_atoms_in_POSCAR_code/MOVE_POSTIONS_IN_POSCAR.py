@@ -1,4 +1,4 @@
-#!/home/sebastian/anaconda3/bin/python
+#!/Users/ieatzombies/mambaforge3/bin/python
 def update_positions_in_file(file_name, start_line, end_line, dx, dy, dz):
     with open(file_name, 'r') as f:
         lines = f.readlines()
